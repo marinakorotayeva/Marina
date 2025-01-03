@@ -1,0 +1,53 @@
+import pandas as pd
+import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import matplotlib.pyplot as plt
+
+# Load Excel data
+file_path = 'path_to_your_excel_file.xlsx'  # Replace with the correct file path
+atms = pd.read_excel(file_path, sheet_name="ATM")
+
+# Preprocess data
+atms['Date'] = pd.to_datetime(atms['Date'])
+daily_withdrawals = atms.groupby(['Date', 'ATM ID'])['Cash Withdrawn'].sum().reset_index()
+daily_withdrawals_pivot = daily_withdrawals.pivot(index='Date', columns='ATM ID', values='Cash Withdrawn').fillna(0)
+
+# Select a specific ATM for modeling
+selected_atm_id = daily_withdrawals_pivot.columns[0]
+atm_data = daily_withdrawals_pivot[selected_atm_id]
+
+# Check for missing values
+atm_data.fillna(0, inplace=True)
+
+# Differencing for stationarity
+atm_data_diff = atm_data.diff().dropna()
+
+# Train-test split
+train_size = int(len(atm_data_diff) * 0.8)
+train, test = atm_data_diff[:train_size], atm_data_diff[train_size:]
+
+# Fit ARIMA model
+model = ARIMA(train, order=(5, 1, 2))  # Adjust p, d, q as needed
+model_fit = model.fit()
+
+# Forecast
+forecast = model_fit.forecast(steps=len(test))
+forecast_cumsum = forecast.cumsum() + atm_data[train_size]
+
+# Evaluate
+actual = test.cumsum() + atm_data[train_size]
+mae = mean_absolute_error(actual, forecast_cumsum)
+rmse = np.sqrt(mean_squared_error(actual, forecast_cumsum))
+
+# Plot
+plt.figure(figsize=(12, 6))
+plt.plot(atm_data, label="Actual Data")
+plt.plot(forecast_cumsum.index, forecast_cumsum, label="Forecast", color='orange')
+plt.axvline(x=atm_data.index[train_size], color='red', linestyle='--', label='Train-Test Split')
+plt.legend()
+plt.title(f"ATM Cash Withdrawal Forecasting (ATM ID: {selected_atm_id})")
+plt.show()
+
+# Print metrics
+print(f"MAE: {mae}, RMSE: {rmse}")
