@@ -1,53 +1,170 @@
 import pandas as pd
 import numpy as np
-from statsmodels.tsa.arima.model import ARIMA
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 import matplotlib.pyplot as plt
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from datetime import datetime
+import math
+import os
 
-# Load Excel data
-file_path = 'path_to_your_excel_file.xlsx'  # Replace with the correct file path
-atms = pd.read_excel(file_path, sheet_name="ATM")
+# Ensure output directory exists
+output_dir = "output_graphs"
+os.makedirs(output_dir, exist_ok=True)
 
-# Preprocess data
-atms['Date'] = pd.to_datetime(atms['Date'])
-daily_withdrawals = atms.groupby(['Date', 'ATM ID'])['Cash Withdrawn'].sum().reset_index()
-daily_withdrawals_pivot = daily_withdrawals.pivot(index='Date', columns='ATM ID', values='Cash Withdrawn').fillna(0)
+# Load dataset with correct delimiter
+file_path = '5ATM_features.csv'  # Replace with your dataset's file path
+data = pd.read_csv(file_path, delimiter=';')
 
-# Select a specific ATM for modeling
-selected_atm_id = daily_withdrawals_pivot.columns[0]
-atm_data = daily_withdrawals_pivot[selected_atm_id]
+# Check column names and data types
+print("Columns in the dataset:", data.columns)
+print("Column data types:\n", data.dtypes)
 
-# Check for missing values
-atm_data.fillna(0, inplace=True)
+# Identify the date column dynamically
+date_column = 'DATE'  # Based on the inspected column names
+data[date_column] = pd.to_datetime(data[date_column], errors='coerce')  # Ensure proper date parsing
+data.dropna(subset=[date_column], inplace=True)  # Drop rows with invalid dates
+data.sort_values(by=date_column, inplace=True)  # Ensure dates are sorted
+data.set_index(date_column, inplace=True)
 
-# Differencing for stationarity
-atm_data_diff = atm_data.diff().dropna()
+# List of ATMs to analyze
+atms_to_analyze = ['Z0241002', 'Z0951001', 'Z1031001', 'Z1119001', 'Z1899001']
 
-# Train-test split
-train_size = int(len(atm_data_diff) * 0.8)
-train, test = atm_data_diff[:train_size], atm_data_diff[train_size:]
+# Define feature sets
+feature_sets = {
+    "F0": ["ATM_WITHDRWLS_1WEEKAGO"],
+    "F1": ["ATM_WITHDRWLS_1WEEKAGO", "HOLIDAY", "AVG_ATM_WITHDRW_PREVMONTH", "DAY_OF_WEEK"],
+    "F2": ["ATM_WITHDRWLS_1WEEKAGO", "HOLIDAY", "AVG_ATM_WITHDRW_PREVMONTH", "DAY_OF_WEEK", "MONTH", "FIRSTWORKDAY", "LASTWORKDAY"],
+    "F3": ["ATM_WITHDRWLS_1WEEKAGO", "ATM_WITHDRWLS_2WEEKAGO", "HOLIDAY", "AVG_ATM_WITHDRW_PREVMONTH", "DAY_OF_WEEK", "IsSaturday", "IsSunday"],
+    "F4": ["ATM_WITHDRWLS_1WEEKAGO", "HOLIDAY", "AVG_ATM_WITHDRW_PREVMONTH", "DAY_OF_WEEK", "MONTH", "FIRSTWORKDAY", "LASTWORKDAY", "ATM_WITHDRWLS_2WEEKAGO", "BRA_WITHDRWLS", "BRA_DEPOSITS", "IsSaturday", "IsSunday"],
+    "F5": ["ATM_WITHDRWLS_1WEEKAGO", "HOLIDAY", "AVG_ATM_WITHDRW_PREVMONTH", "ATM_WITHDRWLS_2WEEKAGO", "DAY_OF_WEEK", "MONTH", "FIRSTWORKDAY", "LASTWORKDAY", "BRA_WITHDRWL_RATIO", "AVG_BRA_WITHDRWL_PREVMONTH", "BRA_WITHDRWLS", "BRA_DEPOSITS", "IsSaturday", "IsSunday"]
+}
 
-# Fit ARIMA model
-model = ARIMA(train, order=(5, 1, 2))  # Adjust p, d, q as needed
-model_fit = model.fit()
+# Placeholder for combined results
+combined_results = []
 
-# Forecast
-forecast = model_fit.forecast(steps=len(test))
-forecast_cumsum = forecast.cumsum() + atm_data[train_size]
+# Adjust split_date to fall within the date range
+split_date = datetime(2007, 6, 1)  # Adjusted split date
 
-# Evaluate
-actual = test.cumsum() + atm_data[train_size]
-mae = mean_absolute_error(actual, forecast_cumsum)
-rmse = np.sqrt(mean_squared_error(actual, forecast_cumsum))
+# Process each ATM separately
+for atm_id in atms_to_analyze:
+    print(f"\nProcessing ATM: {atm_id}")
 
-# Plot
-plt.figure(figsize=(12, 6))
-plt.plot(atm_data, label="Actual Data")
-plt.plot(forecast_cumsum.index, forecast_cumsum, label="Forecast", color='orange')
-plt.axvline(x=atm_data.index[train_size], color='red', linestyle='--', label='Train-Test Split')
-plt.legend()
-plt.title(f"ATM Cash Withdrawal Forecasting (ATM ID: {selected_atm_id})")
-plt.show()
+    # Filter data for the current ATM
+    atm_data = data[data['ATM_ID'] == atm_id]
 
-# Print metrics
-print(f"MAE: {mae}, RMSE: {rmse}")
+    if atm_data.empty:
+        print(f"No data available for ATM {atm_id}. Skipping.")
+        continue
+
+    # Iterate through each feature set
+    for feature_set_name, feature_set in feature_sets.items():
+        print(f"  Processing Feature Set: {feature_set_name}")
+
+        # Filter data to include only relevant features
+        selected_columns = ["ATM_WITHDRWLS"] + [col for col in feature_set if col in atm_data.columns]
+        if not selected_columns:
+            print(f"  No valid columns found for feature set {feature_set_name}. Skipping.")
+            continue
+
+        atm_data_filtered = atm_data[selected_columns]
+
+        # Handle missing values in the series and ensure numeric
+        atm_data_filtered = atm_data_filtered.apply(pd.to_numeric, errors='coerce').fillna(0)  # Convert to numeric, replace NaNs with 0
+
+        # Train-test split
+        train = atm_data_filtered[atm_data_filtered.index < split_date]
+        test = atm_data_filtered[atm_data_filtered.index >= split_date]
+
+        # Skip if test set is empty
+        if test.empty:
+            print(f"  Skipping {feature_set_name} due to empty test set.")
+            continue
+
+        # Target variable (ATM withdrawals)
+        train_target = train["ATM_WITHDRWLS"]
+        test_target = test["ATM_WITHDRWLS"]
+
+        # Exogenous variables (features)
+        exog_train = train[feature_set]
+        exog_test = test[feature_set]
+
+        # Fit SARIMAX model
+        model = SARIMAX(train_target, exog=exog_train, order=(1, 1, 1))  # Modify SARIMAX order based on dataset characteristics
+        fitted_model = model.fit()
+
+        # Predict on train and test using exogenous variables
+        train_pred = fitted_model.predict(start=0, end=len(train_target) - 1, exog=exog_train).fillna(0)
+        test_pred = fitted_model.predict(start=len(train_target), end=len(train_target) + len(test_target) - 1, exog=exog_test).fillna(0)
+
+        # Calculate MAE, RMSE, and Relative Error
+        train_mae = mean_absolute_error(train_target, train_pred)
+        test_mae = mean_absolute_error(test_target, test_pred)
+        train_rmse = math.sqrt(mean_squared_error(train_target, train_pred))
+        test_rmse = math.sqrt(mean_squared_error(test_target, test_pred))
+        mean_target_value = test_target.mean()
+        relative_error = (test_mae / mean_target_value) * 100 if mean_target_value != 0 else float('inf')
+
+        # Store results
+        combined_results.append({
+            'ATM_ID': atm_id,
+            'Feature_Set': feature_set_name,
+            'MAE': f"{int(train_mae)} / {int(test_mae)}",
+            'RMSE': f"{int(train_rmse)} / {int(test_rmse)}",
+            'Relative_Error (%)': f"{relative_error:.2f}"
+        })
+
+        # Plot actual vs predicted for this feature set
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_target.index, train_target, label='Train Actual', color='blue')
+        plt.plot(test_target.index, test_target, label='Test Actual', color='green')
+        plt.plot(train_target.index, train_pred, label='Train Predicted', linestyle='--', color='orange')
+        plt.plot(test_target.index, test_pred, label='Test Predicted', linestyle='--', color='red')
+        plt.title(f'{atm_id} - {feature_set_name} - Actual vs Predicted')
+        plt.legend()
+
+        # Save the plot
+        graph_path = os.path.join(output_dir, f'{atm_id}_{feature_set_name}_Actual_vs_Predicted.png')
+        plt.savefig(graph_path)
+        plt.close()
+
+# Create a DataFrame for combined results
+results_df = pd.DataFrame(combined_results)
+
+# Save combined results to CSV
+csv_file_path = 'ATM_Performance_Results.csv'
+results_df.to_csv(csv_file_path, index=False)
+
+# Print results to console for verification
+print("\nResults Table:")
+print(results_df)
+
+# Plot MAE and RMSE comparison
+if not results_df.empty:
+    plt.figure(figsize=(12, 8))
+    width = 0.35
+    x = np.arange(len(results_df['Feature_Set']))
+
+    # MAE and RMSE bars
+    mae_values = [int(value.split(' / ')[1]) for value in results_df['MAE']]
+    rmse_values = [int(value.split(' / ')[1]) for value in results_df['RMSE']]
+
+    plt.bar(x - width/2, mae_values, width, label='Test MAE', color='orange')
+    plt.bar(x + width/2, rmse_values, width, label='Test RMSE', color='blue')
+
+    # Labels and title
+    plt.xticks(x, results_df['Feature_Set'], rotation=45)
+    plt.title('MAE and RMSE Comparison Across Feature Sets')
+    plt.xlabel('Feature Set')
+    plt.ylabel('Error')
+    plt.legend()
+    plt.tight_layout()
+
+    # Save the comparison plot
+    comparison_graph_path = os.path.join(output_dir, 'ATM_MAE_RMSE_Comparison.png')
+    plt.savefig(comparison_graph_path)
+    plt.close()
+
+print("Processing complete. Results saved to CSV and graphs saved to output folder.")
+
+
+
